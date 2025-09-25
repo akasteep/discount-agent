@@ -134,15 +134,22 @@ def fetch_kaufland(url: str) -> List[Dict]:
     return list(uniq.values())
 
 def send_telegram(text: str) -> None:
+    import urllib.parse, urllib.request, urllib.error, os
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
         print("[INFO] Telegram secrets are missing; skipping send.")
         return
-    data = urllib.parse.urlencode({"chat_id": chat_id, "text": text}).encode()
-    req = urllib.request.Request(f"https://api.telegram.org/bot{token}/sendMessage", data=data)
-    with urllib.request.urlopen(req, timeout=30) as r:
-        print("[INFO] Telegram send status:", r.status)
+    try:
+        data = urllib.parse.urlencode({"chat_id": chat_id, "text": text}).encode()
+        req = urllib.request.Request(f"https://api.telegram.org/bot{token}/sendMessage", data=data)
+        with urllib.request.urlopen(req, timeout=30) as r:
+            print("[INFO] Telegram send status:", r.status)
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "ignore")
+        print(f"[WARN] Telegram HTTPError {e.code}: {body}")
+    except Exception as e:
+        print(f"[WARN] Telegram error: {e}")
 
 def main():
     stores = [
