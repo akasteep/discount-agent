@@ -67,7 +67,21 @@ jobs:
           else
             echo "No secrets; skipping test send."
           fi
-
+      - name: Debug parse output
+        run: |
+          python - <<'PY'
+          import scraper
+          print("=== Biedronka ===")
+          deals1 = scraper.fetch_biedronka("https://www.biedronka.pl/pl/gazetki")
+          print("Всего:", len(deals1))
+          for d in deals1[:5]:
+              print(d)
+          print("=== Kaufland ===")
+          deals2 = scraper.fetch_kaufland("https://sklep.kaufland.pl/oferta.html")
+          print("Всего:", len(deals2))
+          for d in deals2[:5]:
+              print(d)
+          PY
       - name: Run agent
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
