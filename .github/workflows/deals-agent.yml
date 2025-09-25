@@ -19,7 +19,21 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           python -m playwright install --with-deps
-
+      - name: Telegram diag (non-fatal)
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT:  ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -euxo pipefail
+          if [ -n "${TOKEN:-}" ] && [ -n "${CHAT:-}" ]; then
+            echo "== getMe =="
+            curl -sS "https://api.telegram.org/bot${TOKEN}/getMe" || true
+            echo; echo "== sendMessage test =="
+            curl -sS "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+              -d chat_id="${CHAT}" -d text="✅ GitHub Actions: ping" || true
+          else
+            echo "No Telegram secrets; skipping diag."
+          fi
       - name: Run agent
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
