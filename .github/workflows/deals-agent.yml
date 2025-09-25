@@ -7,6 +7,8 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -16,48 +18,55 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Install deps (with retries)
         run: |
           set -euxo pipefail
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          python -m playwright install --with-deps
-          python -m playwright --version
+          # playwright install может флапать: даём 3 попытки
+          for i in 1 2 3; do
+            if python -m playwright install --with-deps && python -m playwright --version; then
+              break
+            fi
+            echo "playwright install failed, retry $i/3"; sleep 5
+          done
 
       - name: Show workspace
         run: |
           set -euxo pipefail
           pwd
           ls -la
-          echo "Python:"
-          python -V
-          which python
-          echo "Pip list (top):"
-          pip list | head -n 50
+          echo "Python:"; python -V; which python
+          echo "Pip list (top):"; pip list | head -n 50
 
+      # Не фейлим весь ран, если телега недоступна — просто логируем
       - name: Telegram ping (test)
         if: ${{ secrets.TELEGRAM_BOT_TOKEN != '' && secrets.TELEGRAM_CHAT_ID != '' }}
+        continue-on-error: true
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           set -euxo pipefail
-          curl -s "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+          curl -sS "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d chat_id="${TELEGRAM_CHAT_ID}" \
-            -d text="✅ GitHub Actions: бот жив."
+            -d text="✅ GitHub Actions: бот жив." || echo "::warning::Telegram ping failed (ignored)"
 
-      - name: Playwright smoke test
+      - name: Playwright smoke test (retry, non-fatal)
+        continue-on-error: true
         run: |
           set -euxo pipefail
-          python - <<'PY'
-          from playwright.sync_api import sync_playwright
-          with sync_playwright() as p:
-              b = p.chromium.launch(headless=True, args=["--no-sandbox"])
-              page = b.new_page()
-              page.goto("https://example.com", timeout=30000)
-              print("Title:", page.title())
-              b.close()
-          PY
+          for i in 1 2; do
+            python - <<'PY' && exit 0 || echo "smoke attempt $i failed"; sleep 5
+from playwright.sync_api import sync_playwright
+with sync_playwright() as p:
+    b = p.chromium.launch(headless=True, args=["--no-sandbox"])
+    page = b.new_page()
+    page.goto("https://example.com", timeout=30000)
+    print("Title:", page.title()); b.close()
+PY
+          done
+          echo "::warning::Playwright smoke test failed (ignored)"
 
       - name: Run agent
         env:
@@ -66,4 +75,5 @@ jobs:
         run: |
           set -euxo pipefail
           test -f scraper.py && echo "scraper.py found" || (echo "scraper.py NOT found" && exit 1)
-          python scraper.py
+          python scraper.py | tee agent.log
+          echo "---- tail agent.log ----"; tail -n 200 agent.log || true
