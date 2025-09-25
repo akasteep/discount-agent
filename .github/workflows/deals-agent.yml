@@ -23,7 +23,6 @@ jobs:
           set -euxo pipefail
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          # playwright install может флапать: даём 3 попытки
           for i in 1 2 3; do
             if python -m playwright install --with-deps && python -m playwright --version; then
               break
@@ -39,34 +38,29 @@ jobs:
           echo "Python:"; python -V; which python
           echo "Pip list (top):"; pip list | head -n 50
 
-      # Не фейлим весь ран, если телега недоступна — просто логируем
       - name: Telegram ping (test)
-        if: ${{ secrets.TELEGRAM_BOT_TOKEN != '' && secrets.TELEGRAM_CHAT_ID != '' }}
-        continue-on-error: true
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:  ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           set -euxo pipefail
-          curl -sS "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            -d chat_id="${TELEGRAM_CHAT_ID}" \
-            -d text="✅ GitHub Actions: бот жив." || echo "::warning::Telegram ping failed (ignored)"
+          if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+            curl -sS "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              -d text="✅ GitHub Actions: бот жив." || echo "::warning::Telegram ping failed (ignored)"
+          else
+            echo "No Telegram secrets; skipping ping."
+          fi
 
-      - name: Playwright smoke test (retry, non-fatal)
+      - name: Playwright smoke test (non-fatal)
         continue-on-error: true
         run: |
           set -euxo pipefail
-          for i in 1 2; do
-            python - <<'PY' && exit 0 || echo "smoke attempt $i failed"; sleep 5
-from playwright.sync_api import sync_playwright
-with sync_playwright() as p:
-    b = p.chromium.launch(headless=True, args=["--no-sandbox"])
-    page = b.new_page()
-    page.goto("https://example.com", timeout=30000)
-    print("Title:", page.title()); b.close()
-PY
-          done
-          echo "::warning::Playwright smoke test failed (ignored)"
+          python -c "from playwright.sync_api import sync_playwright; \
+p=sync_playwright().start(); \
+b=p.chromium.launch(headless=True, args=['--no-sandbox']); \
+page=b.new_page(); page.goto('https://example.com', timeout=30000); \
+print('Title:', page.title()); b.close(); p.stop()"
 
       - name: Run agent
         env:
