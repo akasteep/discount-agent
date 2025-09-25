@@ -1,5 +1,7 @@
 __pycache__/
 *.pyc
 .env
-.idea
-venv/
+config.yaml
+.playwright/
+.idea/
+.vscode/
