@@ -42,7 +42,7 @@ def matches_target(name: str, price: Optional[float], discount: Optional[float])
 def fetch_biedronka(url: str) -> List[Dict]:
     deals: List[Dict] = []
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
         page = browser.new_page()
         page.goto(url, timeout=60_000)
         page.wait_for_load_state("networkidle")
@@ -89,7 +89,7 @@ def fetch_biedronka(url: str) -> List[Dict]:
 def fetch_kaufland(url: str) -> List[Dict]:
     deals: List[Dict] = []
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
         page = browser.new_page()
         page.goto(url, timeout=60_000)
         page.wait_for_load_state("networkidle")
