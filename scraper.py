@@ -5,6 +5,9 @@ from playwright.sync_api import sync_playwright
 import re
 import urllib.parse
 import urllib.request
+import io, requests
+from pdf2image import convert_from_bytes
+import pytesseract
 
 PRICE_RE = re.compile(r"(\d+[.,]\d+)")
 
@@ -38,53 +41,127 @@ def matches_target(name: str, price: Optional[float], discount: Optional[float])
             if max_price is None and min_discount is None:
                 return True
     return False
+def ocr_pdf_text_from_url(pdf_url: str, dpi: int = 200) -> str:
+    """Скачивает PDF, конвертит в изображения и вытаскивает текст через Tesseract (pl+eng)."""
+    resp = requests.get(pdf_url, timeout=60)
+    resp.raise_for_status()
+    images = convert_from_bytes(resp.content, dpi=dpi)  # требует poppler
+    text_chunks = []
+    for img in images:
+        txt = pytesseract.image_to_string(img, lang="pol+eng")
+        if txt:
+            text_chunks.append(txt)
+    return "\n".join(text_chunks)
 
-def fetch_biedronka(url: str) -> List[Dict]:
-    deals: List[Dict] = []
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
-        page = browser.new_page()
-        page.goto(url, timeout=60_000)
-        page.wait_for_load_state("networkidle")
-        html = page.content()
-        browser.close()
-    soup = BeautifulSoup(html, "lxml")
-    candidates = soup.find_all(lambda tag: tag.name in ("div","li","article") and tag.get_text(strip=True) and ("zł" in tag.get_text() or "zl" in tag.get_text().lower()))
-    for c in candidates:
-        text = c.get_text(" ", strip=True)
-        price = parse_price(text)
-        if not price or len(text) < 15:
+def biedronka_extract_deals_from_text(text: str) -> List[Dict]:
+    """Грубый разбор текста из летучки: находит строки с ценой и рядом с ними имя товара."""
+    deals = []
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    for i, line in enumerate(lines):
+        price = parse_price(line)
+        if not price:
             continue
+        # ищем название рядом (строка до/после)
+        name_candidates = []
+        if i > 0: name_candidates.append(lines[i-1])
+        if i+1 < len(lines): name_candidates.append(lines[i+1])
+        # выбираем самую адекватную подпись (не из одних чисел)
         name = None
-        for sel in ["strong", "b", "h3", "h4", "h5"]:
-            el = c.find(sel)
-            if el and len(el.get_text(strip=True)) >= 5:
-                name = el.get_text(" ", strip=True)
+        for cand in name_candidates:
+            if len(cand) >= 4 and not PRICE_RE.fullmatch(cand.replace(",", ".").replace(" ", "")):
+                name = cand
                 break
         if not name:
-            name = text.split(" zł")[0][:80]
-        old_price = None
-        for cls in ["old", "regular", "strike", "przekreslone"]:
-            el = c.find(lambda t: t.name in ("span","div") and cls in " ".join(t.get("class", [])))
-            if el:
-                old_price = parse_price(el.get_text())
-                break
-        discount_pct = round(100*(1 - price/old_price), 1) if old_price and price else None
-        a = c.find("a"); href = a.get("href") if a else url
+            continue
         deals.append({
             "store": "Biedronka",
-            "product_name": name,
+            "product_name": name[:120],
             "price": price,
-            "regular_price": old_price,
-            "discount_pct": discount_pct,
-            "url": href if (href and href.startswith("http")) else url
+            "regular_price": None,
+            "discount_pct": None,
+            "url": "https://www.biedronka.pl",
         })
+    # уникализируем приблизительно по названию+цене
     uniq = {}
     for d in deals:
-        key = (d["product_name"].lower(), d["price"])
+        key = (normalize(d["product_name"]), d["price"])
         if key not in uniq:
             uniq[key] = d
     return list(uniq.values())
+def fetch_biedronka(url: str) -> List[Dict]:
+    """
+    1) Пытаемся вытащить из HTML (если это обычная страница акций).
+    2) Если ноль — пробуем OCR с PDF (летучки иногда только картинками).
+    """
+    # --- Попытка 1: HTML (как было)
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+            page = p.new_page()
+            page.goto(url, timeout=90_000, wait_until="domcontentloaded")
+            page.wait_for_timeout(1500)
+            html = page.content()
+            browser.close()
+        soup = BeautifulSoup(html, "lxml")
+        candidates = soup.find_all(lambda tag: tag.name in ("div","li","article")
+                                   and ("zł" in tag.get_text(" ", strip=True)))
+        deals = []
+        for c in candidates:
+            text = c.get_text(" ", strip=True)
+            price = parse_price(text)
+            if not price or len(text) < 15:
+                continue
+            name = None
+            for sel in ["strong","b","h3","h4","h5"]:
+                el = c.find(sel)
+                if el and len(el.get_text(strip=True)) >= 5:
+                    name = el.get_text(" ", strip=True); break
+            if not name:
+                name = text.split(" zł")[0][:80]
+            deals.append({
+                "store": "Biedronka",
+                "product_name": name,
+                "price": price,
+                "regular_price": None,
+                "discount_pct": None,
+                "url": url
+            })
+        if deals:
+            return deals
+    except Exception as e:
+        print("[WARN] Biedronka HTML parse failed:", e)
+
+    # --- Попытка 2: PDF-OCR
+    try:
+        # Если дали прямую ссылку на пресс-PDF — используем её,
+        # иначе попробуем найти первую ссылку на .pdf на странице press.
+        pdf_url = None
+        if url.lower().endswith(".pdf") or "press" in url:
+            # или прислали URL страницы press с хешем #page=…
+            if url.lower().endswith(".pdf"):
+                pdf_url = url
+            else:
+                # вытащим первую .pdf ссылку с этой страницы
+                r = requests.get(url.split("#")[0], timeout=30)
+                r.raise_for_status()
+                import re
+                m = re.search(r'href="([^"]+\.pdf)"', r.text, re.IGNORECASE)
+                if m:
+                    pdf_url = m.group(1)
+                    if pdf_url.startswith("/"):
+                        pdf_url = "https://www.biedronka.pl" + pdf_url
+        if not pdf_url:
+            print("[WARN] Biedronka PDF url not found on page:", url)
+            return []
+
+        print("[INFO] Biedronka OCR from PDF:", pdf_url)
+        text = ocr_pdf_text_from_url(pdf_url, dpi=220)
+        deals = biedronka_extract_deals_from_text(text)
+        print(f"[INFO] OCR extracted deals: {len(deals)}")
+        return deals
+    except Exception as e:
+        print("[WARN] Biedronka OCR failed:", e)
+        return []
 
 def fetch_kaufland(url: str) -> List[Dict]:
     deals: List[Dict] = []
@@ -165,6 +242,9 @@ def main():
                 all_deals += fetch_kaufland(s["url"])
         except Exception as e:
             print(f"[WARN] {s['name']} failed: {e}")
+            print("[DEBUG] всего собрано акций:", len(all_deals))
+    for d in all_deals[:10]:
+        print("[DEBUG]", d)
 
     hits = [d for d in all_deals if matches_target(d["product_name"], d.get("price"), d.get("discount_pct"))]
 
